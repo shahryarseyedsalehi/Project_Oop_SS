@@ -151,7 +151,7 @@ vector<Node*> nodes;
 vector<Component*> Components;
 Node* GN;
 
-
+int Node_count = 0;
 
 Node* findnode(string name)
 {
@@ -289,7 +289,17 @@ int main()
                 SS>>node1>>node2>>value;
 
                 Node* n1 = findnode(node1);
+                if (!n1) {
+                    n1 = new Node(node1, Node_count++);
+                    nodes.push_back(n1);
+                }
+
                 Node* n2 = findnode(node2);
+                if (!n2) {
+                    n2 = new Node(node2, Node_count++);
+                    nodes.push_back(n2);
+                }
+
                 if(findComponent(typeName)!= nullptr)
                 {
                     cout<<"Error: Resistor "<<typeName<<"already exists in the circuit"<<endl;
