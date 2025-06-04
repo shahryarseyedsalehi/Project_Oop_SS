@@ -208,29 +208,29 @@ double convertToOhms(const string& value)
 }
 double convertToFarad(const string& value)
 {
-    // اصلاح الگوی regex برای پشتیبانی از nF و فاصله بین عدد و واحد
+    
     regex pattern(R"(\s*(\d+(\.\d+)?)(n|u|F|µ)?\s*(F|nF|uF|µF)?)", regex::icase); // پشتیبانی از nF, uF, µF
     smatch match;
 
     if (regex_match(value, match, pattern)) {
         double number = stod(match[1].str());
-        string unit = match[4].str();  // از match[4] برای استخراج واحد استفاده می‌کنیم
+        string unit = match[4].str();
 
         if (unit == "n" || unit == "nF") {
-            return number * 0.000000001;  // نانوفاراد
+            return number * 0.000000001;
         }
         else if (unit == "u" || unit == "µ" || unit == "uF" || unit == "µF") {
-            return number * 0.000001;  // میکروفاراد
+            return number * 0.000001;
         }
         else if (unit == "F" || unit.empty()) {
-            return number;  // فاراد
+            return number;
         }
     }
     else {
-        return -1;  // ورودی نامعتبر
+        return -1;
     }
 
-    return -1;  // ورودی نامعتبر
+    return -1;
 }
 
 
