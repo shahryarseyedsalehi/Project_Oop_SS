@@ -2609,7 +2609,7 @@ void updateCircuitModelFromGUI(Circuit& circuit, const vector<vector<SDL_Point>>
 
                 string wire_resistor_name = "W_auto_" + to_string(wire_segment_count++);
 
-                circuit.add_resistor(wire_resistor_name, n_start->getName(), n_end->getName(), "1n");
+                circuit.add_resistor(wire_resistor_name, n_start->getName(), n_end->getName(), "0.000000001");
             }
         }
     }
@@ -2674,10 +2674,10 @@ void drawGndIcon(SDL_Renderer* renderer, int x, int y, int size, Uint8 r, Uint8 
 class AnalysisDialog {
 public:
     bool active;
-
+    enum class Result { None, RunTransient, RunAC, Cancel };
     enum class View { Main, Transient, ACSweep };
     View currentView;
-
+    Result result;
     string tran_stop_time;
     string tran_start_time;
     string tran_timestep;
@@ -2700,7 +2700,7 @@ public:
     SDL_Rect back_button_rect;
 
 
-    AnalysisDialog() : active(false), currentView(View::Main), active_field(-1) {
+    AnalysisDialog() : active(false), result(Result::None),currentView(View::Main), active_field(-1) {
         tran_stop_time = "1s";
         tran_start_time = "0";
         tran_timestep = "1u";
@@ -2847,7 +2847,7 @@ public:
         if (event.type == SDL_KEYDOWN) {
             if ( event.key.keysym.sym == SDLK_ESCAPE )
             {
-
+                result = Result::Cancel;
                 close();
             }
         }
@@ -2865,6 +2865,7 @@ public:
                 }
             } else {
                 if (SDL_PointInRect(&mousePt, &cancel_button_rect)) {
+                    result = Result::Cancel;
                     close();
                 }
 
@@ -2874,10 +2875,10 @@ public:
                 else if (SDL_PointInRect(&mousePt, &ok_button_rect)) {
 
                     if (currentView == View::Transient) {
-                        //tran_stop_time tran_start_time tran_timestep
+                        result = Result::RunTransient;
 
                     } else if (currentView == View::ACSweep) {
-                        //ac_sweep_type  ac_start_freq  ac_stop_freq ac_points
+                        result = Result::RunAC;
 
                     }
 
@@ -2940,6 +2941,61 @@ public:
     }
 };
 
+bool validateAndUpdateComponent(InputDialog& dialog, Circuit& circuit, SDL_Window* window) {
+    Component* comp = dialog.target;
+    if (!comp) return false;
+
+    string newName = dialog.values[0];
+    string type = comp->getType();
+
+
+    Component* existingComp = findComponent(newName);
+    if (existingComp && existingComp != comp) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                                 "Invalid Name",
+                                 "A component with this name already exists. Please choose another name.",
+                                 window);
+        return false;
+    }
+
+
+    double value = 0;
+    if (type == "Resistor" || type == "Capacitor" || type == "Inductor") {
+        if (type == "Resistor") value = circuit.convertToOhms(dialog.values[1]);
+        if (type == "Capacitor") value = circuit.convertToFarad(dialog.values[1]);
+        if (type == "Inductor") value = circuit.convertToHenry(dialog.values[1]);
+
+        if (value <= 0) {
+            string errorMsg = type + " value must be positive.";
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Invalid Value", errorMsg.c_str(), window);
+            return false;
+        }
+    }
+
+    if (type == "SinVoltageSource" && dialog.values.size() == 4) {
+        double freq = stod(dialog.values[3]);
+        if (freq <= 0) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Invalid Value", "Frequency must be positive.", window);
+            return false;
+        }
+    }
+
+
+    comp->setName(newName);
+    if (type == "Resistor") comp->setValue(circuit.convertToOhms(dialog.values[1]));
+    else if (type == "Capacitor") comp->setValue(circuit.convertToFarad(dialog.values[1]));
+    else if (type == "Inductor") comp->setValue(circuit.convertToHenry(dialog.values[1]));
+    else if (type == "DcVoltageSource") comp->setValue(circuit.convert_to_volts(dialog.values[1]));
+    else if (type == "CurrentSource") comp->setValue(circuit.convert_to_amps(dialog.values[1]));
+    else if (type == "SinVoltageSource" && dialog.values.size() == 4) {
+        double offset = circuit.convert_to_volts(dialog.values[1]);
+        double amp = circuit.convert_to_volts(dialog.values[2]);
+        double freq = stod(dialog.values[3]);
+        static_cast<SinVoltageSource*>(comp)->setSinValues(offset, amp, freq);
+    }
+
+    return true;
+}
 int SDL_main(int argc, char* argv[])
 {
 
@@ -3118,8 +3174,8 @@ int SDL_main(int argc, char* argv[])
     //منفی 1 گذاشتیم یعنی که موس هنوز تو ویندو پلات نیست هنوز
     int mouse_x_plot = -1;
     int mouse_y_plot = -1;
-    int R_count = 2, C_count = 1, L_count = 1, D_count = 1;
-    int V_count = 2, I_count = 1;
+    int R_count = 1, C_count = 1, L_count = 1, D_count = 1;
+    int V_count = 1, I_count = 1;
 
     bool is_running = true;
 
@@ -3132,6 +3188,44 @@ int SDL_main(int argc, char* argv[])
                 analysisDialog.handleEvent(event);
                 continue;
             }
+            if (analysisDialog.result == AnalysisDialog::Result::RunTransient) {
+                analysisDialog.result = AnalysisDialog::Result::None;
+
+
+                double t_stop = Circuit.convertTosecond(analysisDialog.tran_stop_time);
+                double t_start = Circuit.convertTosecond(analysisDialog.tran_start_time);
+                double t_step = Circuit.convertTosecond(analysisDialog.tran_timestep);
+
+
+                if (t_step <= 0 || t_stop <= t_start) {
+
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Analysis Error", "Invalid transient analysis parameters.", window);
+                } else {
+
+                    vector<string> vars_to_print;
+                    for (Node* n : nodes) {
+                        if (n != GN) {
+                            vars_to_print.push_back("V(" + n->getName() + ")");
+                        }
+                    }
+                    for (Component* c : Components) {
+                        string type = c->getType();
+                        if (type == "DcVoltageSource" || type == "SinVoltageSource" || type == "Inductor") {
+                            vars_to_print.push_back("I(" + c->getName() + ")");
+                        }
+                    }
+
+                    if (vars_to_print.empty()) {
+
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Analysis Warning", "There are no nodes in the circuit to analyze.", window);
+                    } else {
+
+                        cout << "\n--- Starting Transient Analysis ---" << endl;
+                        Circuit.performTransientAnalysis(t_step, t_stop, t_start, vars_to_print);
+                        cout << "--- Transient Analysis Finished ---\n" << endl;
+                    }
+                }
+            }
             if (InputDialog.active) {
                 if (event.type == SDL_KEYDOWN) {
                     if (event.key.keysym.sym == SDLK_TAB) {
@@ -3142,7 +3236,10 @@ int SDL_main(int argc, char* argv[])
                         InputDialog.values[InputDialog.active_field].pop_back();
                     }
                     else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_KP_ENTER) {
-
+                        if (validateAndUpdateComponent(InputDialog, Circuit, window)) {
+                            InputDialog.close();
+                            continue;
+                        }
                         Component *comp = InputDialog.target;
                         if (comp) {
                             comp->setName(InputDialog.values[0]);
@@ -3184,6 +3281,10 @@ int SDL_main(int argc, char* argv[])
                     SDL_Point clickPoint = {mouseX_click, mouseY_click};
 
                     if (SDL_PointInRect(&mousePt, &InputDialog.ok_button_rect)) {
+                        if (validateAndUpdateComponent(InputDialog, Circuit, window)) {
+                            InputDialog.close();
+                            continue;
+                        }
                         Component *comp = InputDialog.target;
                         if (comp) {
                             comp->setName(InputDialog.values[0]);
@@ -3301,7 +3402,7 @@ int SDL_main(int argc, char* argv[])
                     SDL_GetMouseState(&mouseX_click, &mouseY_click);
                     SDL_Point clickPoint = {mouseX_click, mouseY_click};
 
-                    int delete_icon_x = 20 + (40 + 25) * 6; // یک موقعیت مثال
+                    int delete_icon_x =  (40 + 25) * 6; // یک موقعیت مثال
                     SDL_Rect deleteIconRect = {delete_icon_x, 5, 40, 40};
 
                     if (SDL_PointInRect(&clickPoint, &deleteIconRect)) {
@@ -3324,7 +3425,7 @@ int SDL_main(int argc, char* argv[])
                     int comp_total_width = comp_w + (2 * comp_pin_len);
                     SDL_Rect componentClickRect = {temp_x, 5, comp_total_width, comp_h};
 
-                    int sim_icon_x = 20 + (40 + 25) * 5;
+                    int sim_icon_x = (40 + 25) * 5;
                     SDL_Rect simClickRect = {sim_icon_x, 5, 60, 40};
 
                     if (SDL_PointInRect(&clickPoint, &simClickRect)) {
@@ -3709,6 +3810,74 @@ int SDL_main(int argc, char* argv[])
                             isDeleteMode = false;
                         }
                     }
+                    if (event.key.keysym.sym == SDLK_u) {
+                        cout << "\n--- Circuit Netlist ---" << endl;
+                        cout << "Total Components: " << Components.size() << endl;
+                        cout << "Total Nodes: " << nodes.size() << endl;
+                        if (GN) {
+                            cout << "Ground Node: " << GN->getName() << endl;
+                        } else {
+                            cout << "Warning: No Ground node is set!" << endl;
+                        }
+                        cout << "-------------------------" << endl;
+
+                        if (Components.empty()) {
+                            cout << "No components in the circuit." << endl;
+                        } else {
+                            for (Component* comp : Components) {
+                                cout << " - Name: " << left << setw(15) << comp->getName()
+                                     << "Type: " << left << setw(18) << comp->getType()
+                                     << "Nodes: " << left << setw(12) << comp->getNode1()->getName()
+                                     << " -> " << left << setw(12) << comp->getNode2()->getName()
+                                     << "Value: " << comp->getvalue() << endl;
+                            }
+                        }
+                        cout << "--- End of Netlist ---\n" << endl;
+                    }
+
+
+                    if (event.key.keysym.sym == SDLK_a) {
+                        componentToPlace = "Resistor";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_s) {
+                        componentToPlace = "Capacitor";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_d) {
+                        componentToPlace = "Inductor";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_f) {
+                        componentToPlace = "Diode";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_g) {
+                        componentToPlace = "DCV";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_h) {
+                        componentToPlace = "SINV";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_j) {
+                        componentToPlace = "DCI";
+                        isComponentMenuOpen = false;
+                    }
+
+                    if (event.key.keysym.sym == SDLK_k) {
+                        componentToPlace = "GND";
+                        isComponentMenuOpen = false;
+                    }
+
+
+
                 }
             }
             if (panjare_math) {
@@ -3844,6 +4013,9 @@ int SDL_main(int argc, char* argv[])
 
 // رسم قطعات جایگذاری شده
         for (Component* comp : Components) {
+            if (comp->getName().rfind("W_auto_", 0) == 0) {
+                continue;
+            }
             Node* n1 = comp->getNode1();
             Node* n2 = comp->getNode2();
 
@@ -3868,6 +4040,7 @@ int SDL_main(int argc, char* argv[])
                 int start_y = n1->y;
 
                 if (compType == "Resistor") {
+
                     drawRotatableResistor(renderer, start_x, start_y, length, rotation_idx, r,g,b,a);
                 }
                 else if (compType == "Capacitor") {
