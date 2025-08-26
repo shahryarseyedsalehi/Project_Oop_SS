@@ -16,8 +16,66 @@
 #include <fstream>
 #include <algorithm>
 #include <windows.h>
-using namespace std;
 
+using namespace std;
+#ifdef _WIN32
+#include <commdlg.h>
+string pickSavePath(HWND owner, const char* defExt = "ckt") {
+    char file[MAX_PATH] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = "Circuit files (*.ckt)\0*.ckt\0All files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = defExt;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (GetSaveFileNameA(&ofn)) return file;
+    return "";
+}
+
+string pickOpenPath(HWND owner) {
+    char file[MAX_PATH] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = "Circuit files (*.ckt)\0*.ckt\0All files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (GetOpenFileNameA(&ofn)) return file;
+    return "";
+}
+#endif
+
+#include <complex>
+using dcomplex = complex<double>;
+
+vector<dcomplex> solveLUComplex(std::vector<std::vector<dcomplex>>& A,
+                                std::vector<dcomplex>& b);
+
+map<string, vector<double>> runACAnalysis(double f_start,
+                                          double f_stop,
+                                          int points,
+                                          int sweepType,
+                                          vector<double>& freq_points);
+
+
+
+#ifdef _WIN32
+#include <SDL2/SDL_syswm.h>
+
+HWND getHWND(SDL_Window* window) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(window, &info)) {
+        return info.info.win.window;
+    }
+    return nullptr;
+}
+#endif
 
 class Node {
 private:
@@ -158,7 +216,7 @@ public:
     void setValue(double r) override {
         if (r > 0) {
             resistance = r;
-            value = r; // Also update the base class value
+            value = r;
         }
     }
 
@@ -388,14 +446,15 @@ public:
     void stamp(vector<vector<double>>& A, vector<double>& b, const map<string, int>& node_map, double time, double time_step) override {
         int v_idx = node_map.at(this->getName());
 
-        if (node1 != GN)
-        {
-            A[v_idx][node_map.at(node1->getName())] = 1.0;
-            A[node_map.at(node1->getName())][v_idx] = 1.0;
+        if (node1 != GN){
+
+            A[v_idx][node_map.at(node1->getName())] += 1.0;
+            A[node_map.at(node1->getName())][v_idx] += 1.0;
         }
-        if (node2 != GN) {
-            A[v_idx][node_map.at(node2->getName())] = -1.0;
-            A[node_map.at(node2->getName())][v_idx] = -1.0;
+        if (node2 != GN)
+        {
+            A[v_idx][node_map.at(node2->getName())] += -1.0;
+            A[node_map.at(node2->getName())][v_idx] += -1.0;
         }
         b[v_idx] = this->getVoltage();
     }
@@ -429,16 +488,20 @@ public:
 
         if (node1 != GN)
         {
-            A[v_idx][node_map.at(node1->getName())] = 1.0;
-            A[node_map.at(node1->getName())][v_idx] = 1.0;
+
+            A[v_idx][node_map.at(node1->getName())] += 1.0;
+            A[node_map.at(node1->getName())][v_idx] += 1.0;
         }
         if (node2 != GN)
         {
-            A[v_idx][node_map.at(node2->getName())] = -1.0;
-            A[node_map.at(node2->getName())][v_idx] = -1.0;
+            A[v_idx][node_map.at(node2->getName())] += -1.0;
+            A[node_map.at(node2->getName())][v_idx] += -1.0;
         }
         b[v_idx] = this->getVoltageAtTime(time);
     }
+    double getOffset()    const { return offset; }
+    double getAmplitude() const { return amp; }
+    double getFrequency() const { return frequency; }
 };
 
 
@@ -527,15 +590,22 @@ public:
         int v_idx = node_map.at(this->getName());
 
         if (node1 != GN) {
-            A[v_idx][node_map.at(node1->getName())] = 1.0;
-            A[node_map.at(node1->getName())][v_idx] = 1.0;
+            A[v_idx][node_map.at(node1->getName())] += 1.0;
+            A[node_map.at(node1->getName())][v_idx] += 1.0;
         }
         if (node2 != GN) {
-            A[v_idx][node_map.at(node2->getName())] = -1.0;
-            A[node_map.at(node2->getName())][v_idx] = -1.0;
+            A[v_idx][node_map.at(node2->getName())] += -1.0;
+            A[node_map.at(node2->getName())][v_idx]  += -1.0;
         }
 
         b[v_idx] = this->getVoltageAtTime(time);
+    }
+    void setWaveform(const std::vector<double>& values, double step) {
+        if (step > 0 && !values.empty()) {
+            voltage_values = values;
+            time_step = step;
+            value = voltage_values.front();
+        }
     }
 };
 
@@ -604,6 +674,56 @@ public:
         }
         return x;
     }
+
+
+
+    vector<dcomplex> solveLUComplex(std::vector<std::vector<dcomplex>>& A,
+                                    std::vector<dcomplex>& b)
+    {
+        int n = (int)b.size();
+        if (n == 0) return {};
+
+        std::vector<std::vector<dcomplex>> L(n, std::vector<dcomplex>(n, dcomplex(0,0)));
+        std::vector<std::vector<dcomplex>> U(n, std::vector<dcomplex>(n, dcomplex(0,0)));
+
+        for (int i = 0; i < n; i++) {
+            for (int k = i; k < n; k++) {
+                dcomplex sum = 0.0;
+                for (int j = 0; j < i; j++)
+                    sum += L[i][j] * U[j][k];
+                U[i][k] = A[i][k] - sum;
+            }
+            for (int k = i; k < n; k++) {
+                if (i == k) L[i][i] = 1.0;
+                else {
+                    dcomplex sum = 0.0;
+                    for (int j = 0; j < i; j++)
+                        sum += L[k][j] * U[j][i];
+                    if (U[i][i] == dcomplex(0,0)) return {};
+                    L[k][i] = (A[k][i] - sum) / U[i][i];
+                }
+            }
+        }
+
+        std::vector<dcomplex> y(n, 0.0);
+        for (int i = 0; i < n; i++) {
+            dcomplex sum = 0.0;
+            for (int j = 0; j < i; j++) sum += L[i][j] * y[j];
+            if (L[i][i] == dcomplex(0,0)) return {};
+            y[i] = (b[i] - sum) / L[i][i];
+        }
+
+        std::vector<dcomplex> x(n, 0.0);
+        for (int i = n - 1; i >= 0; i--) {
+            dcomplex sum = 0.0;
+            for (int j = i + 1; j < n; j++) sum += U[i][j] * x[j];
+            if (U[i][i] == dcomplex(0,0)) return {};
+            x[i] = (y[i] - sum) / U[i][i];
+        }
+        return x;
+    }
+
+
 
     double get_printable_value(const string& var, const map<string, int>& node_map, const vector<double>& x, double time_step = 0) {
         char type = var.front();
@@ -749,7 +869,6 @@ public:
     {
         if (GN == nullptr)
         {
-            cout << "Error: GND node not set." << endl;
             return;
         }
 
@@ -780,7 +899,7 @@ public:
         {
             vector<double> x = solve_system(matrix_size, node_map, time, t_step);
             if (x.empty())
-            { cout << "Error: Analysis failed (singular matrix or no convergence)." << endl; return; }
+            {  return; }
 
             time_points.push_back(time);
             for (const auto& var : vars_to_print)
@@ -826,7 +945,7 @@ public:
     void performDCSweepAnalysis(const string& source_name, double start_v, double end_v, double increment, const string& var_to_print)
     {
         if (GN == nullptr)
-        { cout << "Error: No Ground node detected in the circuit." << endl;
+        {
             return;
         }
 
@@ -959,6 +1078,29 @@ public:
             }
         }
 
+    }
+    double convertToHertz(const string& value) {
+        regex pattern(R"(\s*(\d+(?:\.\d+)?)\s*(\S*)\s*)", regex::icase);
+        smatch match;
+
+        if (regex_match(value, match, pattern)) {
+            double number = stod(match[1].str());
+            string unit = match[2].str();
+            transform(unit.begin(), unit.end(), unit.begin(), ::tolower);
+
+            if (unit == "" || unit == "hz") {
+                return number;
+            } else if (unit == "k" || unit == "khz") {
+                return number * 1e3;
+            } else if (unit == "m" || unit == "mhz") {
+                return number * 1e6;
+            } else if (unit == "g" || unit == "ghz") {
+                return number * 1e9;
+            } else {
+                return number;
+            }
+        }
+        return -1;
     }
     double convertToHenry(const string& value) {
         regex pattern(R"(\s*(\d+(?:\.\d+)?)\s*(\S*)\s*)", regex::icase);
@@ -1244,7 +1386,7 @@ public:
 
         double voffset = convert_to_volts(offset_string);
         double vamplitude = convert_to_volts(amp_string);
-        double frequency = stod(frequency_str);
+        double frequency = convertToHertz(frequency_str);
 
         if (voffset == -1 || vamplitude == -1)
         {
@@ -1321,7 +1463,8 @@ public:
             delete *it;
             Components.erase(it);
             cout << "Resistor " << name << " deleted successfully." << endl;
-        } else {
+        }
+        else {
             cout << "Error: Cannot delete resistor; component not found" << endl;
         }
     }
@@ -1570,8 +1713,8 @@ public:
     }
 
 
-    //GRAPHIC PART:
-    // این همان تابع قبلی خودمونه که اینجا صرفا خروجی رو به جای چاپ تو کنسول داخل یه مپ ذخیره میکنیم تا بعدا نشونش بدیم
+
+
 
     map<string, vector<double>> runTransientAnalysis(double t_step, double t_stop, double t_start, const vector<string>& vars_to_print, vector<double>& time_points)
     {
@@ -1611,7 +1754,7 @@ public:
             if (x.empty())
             {
                 cout << "Error: Analysis failed (singular matrix or no convergence)." << endl;
-                results.clear(); // Clear any partial results
+                results.clear();
                 return results;
             }
 
@@ -1637,6 +1780,216 @@ public:
             }
         }
         return results;
+    }
+    map<string, vector<double>> runACAnalysis(double f_start,
+                                              double f_stop,
+                                              int points,
+                                              int sweepType,
+                                              vector<double>& freq_points)
+    {
+        map<string, vector<double>> results;
+        freq_points.clear();
+
+        if (GN == nullptr) {
+            cout << "Error: GND node not set." << endl;
+            return results;
+        }
+
+
+        int voltage_source_count = 0;
+        for (auto comp : Components) {
+            if (comp->getType() == "DcVoltageSource" || comp->getType() == "SinVoltageSource") {
+                voltage_source_count++;
+            }
+        }
+
+        int node_count = (int)nodes.size() - 1;
+        int n = node_count + voltage_source_count;
+
+        map<string, int> node_map;
+        int current_idx = 0;
+        for (auto node : nodes) {
+            if (node != GN) node_map[node->getName()] = current_idx++;
+        }
+        for (auto comp : Components) {
+            if (comp->getType() == "DcVoltageSource" || comp->getType() == "SinVoltageSource") {
+                node_map[comp->getName()] = current_idx++;
+            }
+        }
+
+
+        if (points < 2) points = 2;
+        if (f_start <= 0) f_start = 1.0;
+        if (f_stop <= f_start) f_stop = f_start * 10.0;
+
+        if (sweepType == 2) {
+            double step = (f_stop - f_start) / (points - 1);
+            for (int i=0; i<points; ++i) freq_points.push_back(f_start + i*step);
+        } else if (sweepType == 1) {
+            double r = pow(10.0, 1.0 / (points - 1));
+            double f = f_start;
+            for (int i=0; i<points; ++i) {
+                freq_points.push_back(f);
+                f *= r;
+                if (f > f_stop) break;
+            }
+        }
+        else {
+            double r = pow(2.0, 1.0 / (points - 1));
+            double f = f_start;
+            for (int i=0; i<points; ++i) {
+                freq_points.push_back(f);
+                f *= r;
+                if (f > f_stop) break;
+            }
+        }
+
+
+
+        for (auto node : nodes) {
+            if (node == GN) continue;
+            results["V(" + node->getName() + ")"] = {};
+        }
+
+        for (auto comp : Components) {
+            string t = comp->getType();
+            if (t == "Resistor" || t == "Capacitor" || t == "Inductor" ||
+                t == "DcVoltageSource" || t == "SinVoltageSource") {
+                results["I(" + comp->getName() + ")"] = {};
+            }
+        }
+
+        for (double f : freq_points) {
+            double w = 2.0 * M_PI * f;
+            vector<vector<dcomplex>> A(n, vector<dcomplex>(n, dcomplex(0,0)));
+            vector<dcomplex> b(n, dcomplex(0,0));
+
+            for (auto comp : Components) {
+                string t = comp->getType();
+                Node* n1 = comp->getNode1();
+                Node* n2 = comp->getNode2();
+
+                auto idx = [&](Node* nn)->int{
+                    if (nn == GN) return -1;
+                    return node_map.at(nn->getName());
+                };
+
+                int n1i = idx(n1);
+                int n2i = idx(n2);
+
+                auto addYY = [&](int i, int j, dcomplex val){
+                    if (i>=0 && j>=0) A[i][j] += val;
+                };
+
+                if (t == "Resistor") {
+                    double R = comp->getRes();
+                    dcomplex Y = (R>0)? dcomplex(1.0/R, 0.0) : dcomplex(0,0);
+                    if (n1i>=0) addYY(n1i,n1i,Y);
+                    if (n2i>=0) addYY(n2i,n2i,Y);
+                    if (n1i>=0 && n2i>=0) { addYY(n1i,n2i,-Y); addYY(n2i,n1i,-Y); }
+                }
+                else if (t == "Capacitor") {
+                    double C = comp->getCap();
+                    dcomplex Y = dcomplex(0.0, w*C); // j*w*C
+                    if (n1i>=0) addYY(n1i,n1i,Y);
+                    if (n2i>=0) addYY(n2i,n2i,Y);
+                    if (n1i>=0 && n2i>=0) { addYY(n1i,n2i,-Y); addYY(n2i,n1i,-Y); }
+                }
+                else if (t == "Inductor") {
+                    double L = comp->getInd();
+                    dcomplex Y = (L>0)? dcomplex(0.0, -1.0/(w*L)) : dcomplex(0,0); // 1/(j*w*L) = -j/(wL)
+                    if (n1i>=0) addYY(n1i,n1i,Y);
+                    if (n2i>=0) addYY(n2i,n2i,Y);
+                    if (n1i>=0 && n2i>=0) { addYY(n1i,n2i,-Y); addYY(n2i,n1i,-Y); }
+                }
+                else if (t == "DcVoltageSource" || t == "SinVoltageSource") {
+                    int v_idx = node_map.at(comp->getName());
+
+                    if (n1i>=0) { A[v_idx][n1i] += 1.0; A[n1i][v_idx] += 1.0; }
+                    if (n2i>=0) { A[v_idx][n2i] -= 1.0; A[n2i][v_idx] -= 1.0; }
+
+                    if (t == "SinVoltageSource") {
+
+                        double amp = comp->getvalue();
+                        b[v_idx] = dcomplex(amp, 0.0);
+                    }
+                    else {
+
+                        b[v_idx] = dcomplex(0.0, 0.0);
+                    }
+                }
+                else if (t == "CurrentSource") {
+                    /*
+                      double Iac = comp->getvalue();
+                      if (n1i>=0) b[n1i] -= dcomplex(Iac, 0.0);
+                      if (n2i>=0) b[n2i] += dcomplex(Iac, 0.0);
+                     */
+                }
+
+            }
+
+            auto x = solveLUComplex(A,b);
+            if (x.empty()) {
+                cout << "Error: AC solve failed at f=" << f << " Hz" << endl;
+
+                for (auto &kv : results) kv.second.push_back(0.0);
+                continue;
+            }
+
+
+            for (auto node : nodes) {
+                if (node == GN) continue;
+                int idxNode = node_map.at(node->getName());
+                results["V(" + node->getName() + ")"].push_back( std::abs(x[idxNode]) );
+            }
+
+            for (auto comp : Components) {
+                string nm = comp->getName();
+                string t = comp->getType();
+                Node* n1 = comp->getNode1();
+                Node* n2 = comp->getNode2();
+
+                auto getV = [&](Node* nn)->dcomplex{
+                    if (nn == GN) return dcomplex(0,0);
+                    return x[node_map.at(nn->getName())];
+                };
+                dcomplex Vd = getV(n1) - getV(n2);
+                double magI = 0.0;
+
+                if (t == "Resistor") {
+                    double R = comp->getRes();
+                    if (R>0) magI = std::abs( Vd / R );
+                } else if (t == "Capacitor") {
+                    double C = comp->getCap();
+                    dcomplex Y = dcomplex(0.0, w*C);
+                    magI = std::abs( Y * Vd );
+                } else if (t == "Inductor") {
+                    double L = comp->getInd();
+                    if (L>0) {
+                        dcomplex Z = dcomplex(0.0, w*L);
+                        magI = std::abs( Vd / Z );
+                    }
+                } else if (t == "DcVoltageSource" || t == "SinVoltageSource") {
+                    int vidx = node_map.at(nm);
+                    magI = std::abs( x[vidx] );
+                }
+
+                if (results.count("I(" + nm + ")")) results["I(" + nm + ")"].push_back(magI);
+            }
+        }
+
+        return results;
+    }
+    void add_waveform_source(string typeName, string node1, string node2,
+                             const vector<double>& values, double step) {
+        Node* n1 = findnode(node1); if (!n1) { n1 = new Node(node1, Node_count++); nodes.push_back(n1); }
+        Node* n2 = findnode(node2); if (!n2) { n2 = new Node(node2, Node_count++); nodes.push_back(n2); }
+
+        if (findComponent(typeName) != nullptr) return;
+        if (step <= 0 || values.empty()) { return; }
+
+        WaveformSource* wav = new WaveformSource(typeName, n1, n2, values, step);
+        Components.push_back(wav);
     }
 
 };
@@ -1701,6 +2054,10 @@ public:
             labels = {"Name:", "Offset (V):", "Amplitude (V):", "Frequency (Hz):"};
             values = {component->getName(), "0", "5", "1000"};
         }
+        else if (type == "WaveformSource") {
+            labels = {"Name:", "Step (e.g. 10u):", "Samples CSV (V):"};
+            values = {component->getName(), "10u", "5,5,0,0,5,5,0,0"};
+        }
 
         int dialog_w = 350;
         int dialog_h = 50 + (values.size() * 40) + 60;
@@ -1729,8 +2086,8 @@ public:
 };
 
 
-//GRID
-// نقطه چین درست میکنه این تو صفحه، اینو زدم که سیمکشی و اینا راحت باشه
+
+
 void draw_grid(SDL_Renderer* renderer) {
     SDL_SetRenderDrawColor(renderer, 50, 50, 50, 255);
 
@@ -1740,14 +2097,14 @@ void draw_grid(SDL_Renderer* renderer) {
         }
     }
 }
-//تابع ساده مستطیل توپر
+
 void FilledRect (SDL_Renderer* ren, int x, int y, int w, int h, Uint8 r, Uint8 g, Uint8 b, Uint8 a = 255) {
     SDL_Rect rect{ x, y, w, h };
     SDL_SetRenderDrawColor(ren, r, g, b, a);
     SDL_RenderFillRect(ren, &rect);
 }
 
-//این تابع برای اشکال منو هست و همچنین آیکونهای دیگه
+
 
 void drawNewFileIcon(SDL_Renderer* renderer, int x, int y, int size) {
     Uint8 page_r = 0,   page_g = 0,   page_b = 0,   page_a = 255;
@@ -2109,9 +2466,31 @@ void drawDCVoltageSourceIcon(SDL_Renderer* renderer, int cx, int cy, int radius,
     int minus_cy = cy + radius / 2;
     thickLineRGBA(renderer, cx - sign_size / 2, minus_cy, cx + sign_size / 2, minus_cy, thickness, r, g, b, a);
 }
+void drawWaveformVoltageSourceIcon(SDL_Renderer* renderer, int cx, int cy, int radius, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
+    int thickness = 3;
 
-//تابع رسم سیگناله این
-//طبق گفته داک میاد اول رنج تایم و ولتاژ رو درمیاره، سپس از datapointها استفاده میکنه و نقطه رو به نقطه وصل میکنه و نمودار میسازه
+    for (int i = 0; i < thickness; ++i) {
+        circleRGBA(renderer, cx, cy, radius - i, r, g, b, a);
+    }
+
+    int lead_length = radius / 2;
+    thickLineRGBA(renderer, cx, cy - radius, cx, cy - radius - lead_length, thickness, r, g, b, a);
+    thickLineRGBA(renderer, cx, cy + radius, cx, cy + radius + lead_length, thickness, r, g, b, a);
+
+    int w = radius + radius/2;
+    int h = radius / 2;
+    int x0 = cx - w/2;
+    int y0 = cy;
+    thickLineRGBA(renderer, x0,              y0,      x0 + w/3,   y0,      thickness, r,g,b,a);
+    thickLineRGBA(renderer, x0 + w/3,        y0,      x0 + w/3,   y0 - h,  thickness, r,g,b,a);
+    thickLineRGBA(renderer, x0 + w/3,        y0 - h,  x0 + 2*w/3, y0 - h,  thickness, r,g,b,a);
+    thickLineRGBA(renderer, x0 + 2*w/3,      y0 - h,  x0 + 2*w/3, y0,      thickness, r,g,b,a);
+    thickLineRGBA(renderer, x0 + 2*w/3,      y0,      x0 + w,     y0,      thickness, r,g,b,a);
+}
+
+
+
+
 void drawSignal(SDL_Renderer* renderer,
                 const vector<double>& time,
                 const vector<double>& signal,
@@ -2161,7 +2540,7 @@ void drawText(SDL_Renderer* renderer, TTF_Font* font, const string& text, int x,
     SDL_FreeSurface(surface);
 }
 
-//تابع برای کشیدن محورهای نمودار سیگنال
+
 void drawAxes(SDL_Renderer* renderer, TTF_Font* font, const SDL_Rect& plotArea,
               double minTime, double maxTime, double minVoltage, double maxVoltage) {
 
@@ -2191,12 +2570,10 @@ void drawAxes(SDL_Renderer* renderer, TTF_Font* font, const SDL_Rect& plotArea,
         // Draw the tick mark line
         SDL_RenderDrawLine(renderer, x, plotArea.y + plotArea.h, x, plotArea.y + plotArea.h + tickLength);
 
-        // Calculate and format the label value
         double value = minTime + (i * timeStep);
         stringstream ss;
-        ss << fixed << setprecision(2) << value; // Format to two decimal places
+        ss << fixed << setprecision(2) << value;
 
-        // Draw the text label
         drawText(renderer, font, ss.str(), x - 10, plotArea.y + plotArea.h + 8, axisColor);
     }
 }
@@ -2208,10 +2585,10 @@ void zoom(double& viewMin, double& viewMax, double F, double center) {
     viewMax = viewMin + range2;
 }
 
-// تابع رسم مقاومت که از قبل داشتیم
+// تابع رسم مقاومت
 void drawRotatableResistor(SDL_Renderer* renderer, int x, int y, int length, int rotation, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
     int zig_height = 10;
-    int num_points = 8; // تعداد نقاط اصلی شکل
+    int num_points = 8;
     SDL_Point points[num_points];
 
     points[0] = {0, 0};
@@ -2220,10 +2597,10 @@ void drawRotatableResistor(SDL_Renderer* renderer, int x, int y, int length, int
     points[3] = {(int)(length * 0.45), zig_height};
     points[4] = {(int)(length * 0.65), -zig_height};
     points[5] = {(int)(length * 0.85), 0};
-    points[6] = {(int)(length * 0.85), 0}; // این نقطه در واقع سیم انتهایی است
+    points[6] = {(int)(length * 0.85), 0};
     points[7] = {length, 0};
 
-    double angle = rotation * M_PI / 2.0; // 0, 90, 180, 270 degrees
+    double angle = rotation * M_PI / 2.0;
     SDL_Point rotated_points[num_points];
 
     for (int i = 0; i < num_points; ++i) {
@@ -2266,42 +2643,41 @@ void drawRotatableCapacitor(SDL_Renderer* renderer, int x, int y, int length, in
     thickLineRGBA(renderer, points[6].x, points[6].y, points[7].x, points[7].y, 3, r,g,b,a);
 }
 
+
+
 // تابع رسم سلف
 
 void drawRotatableInductor(SDL_Renderer* renderer, int x, int y, int length, int rotation, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
 
     vector<SDL_Point> local_points;
     const int thickness = 3;
-    const int num_loops = 4; // تعداد حلقه‌های سیم‌پیچ
-    const int segments_per_loop = 12; // تعداد قطعات برای رسم هر نیم‌دایره (برای نرمی بیشتر)
+    const int num_loops = 4;
+    const int segments_per_loop = 12;
 
     const double lead_width_ratio = 0.15; // درصد طول سیم‌های دو سر
     const double coil_width_ratio = 1.0 - (2.0 * lead_width_ratio);
 
-    // تولید سیم ابتدایی
+
     local_points.push_back({0, 0});
     local_points.push_back({(int)(length * lead_width_ratio), 0});
 
-    // تولید حلقه‌های سیم‌پیچ
+
     double coil_section_width = length * coil_width_ratio;
     double loop_width = coil_section_width / num_loops;
     double radius = loop_width / 2.0;
 
     for (int i = 0; i < num_loops; ++i) {
         double loop_center_x = (length * lead_width_ratio) + (i * loop_width) + radius;
-        // رسم یک نیم‌دایره به عنوان حلقه
         for (int j = 0; j <= segments_per_loop; ++j) {
-            double angle_rad = M_PI - (M_PI * j / segments_per_loop); // زاویه از ۱۸۰ به ۰ درجه
+            double angle_rad = M_PI - (M_PI * j / segments_per_loop);
             double point_x = loop_center_x + radius * cos(angle_rad);
-            double point_y = 0 - radius * sin(angle_rad); // مختصات y نسبت به خط مرکزی (y=0)
+            double point_y = 0 - radius * sin(angle_rad);
             local_points.push_back({(int)round(point_x), (int)round(point_y)});
         }
     }
 
-    // تولید سیم انتهایی
     local_points.push_back({length, 0});
 
-    // 2. تمام نقاط محلی را چرخانده و به موقعیت اصلی قطعه (x,y) منتقل می‌کنیم
     vector<SDL_Point> world_points;
     double rotation_angle = rotation * M_PI / 2.0;
 
@@ -2311,7 +2687,6 @@ void drawRotatableInductor(SDL_Renderer* renderer, int x, int y, int length, int
         world_points.push_back({x + rotated_x, y + rotated_y});
     }
 
-    // 3. خطوط را بین نقاط نهایی (در مختصات جهانی) رسم می‌کنیم
     for (size_t i = 0; i < world_points.size() - 1; ++i) {
         thickLineRGBA(renderer,
                       world_points[i].x, world_points[i].y,
@@ -2320,7 +2695,6 @@ void drawRotatableInductor(SDL_Renderer* renderer, int x, int y, int length, int
     }
 }
 
-// تابع رسم دیود
 void drawRotatableDiode(SDL_Renderer* renderer, int x, int y, int length, int rotation, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
     double lead_width = length * 0.4;
     double triangle_width = length * 0.2;
@@ -2353,48 +2727,40 @@ void drawRotatableDiode(SDL_Renderer* renderer, int x, int y, int length, int ro
     thickLineRGBA(renderer, all_points[7].x, all_points[7].y, all_points[8].x, all_points[8].y, 3, r,g,b,a);
 }
 
-//طراحی ایکون سیم
+
 void drawsimIcon(SDL_Renderer* renderer, int x, int y, int size) {
-    // رنگ آیکون (آبی)
+
     Uint8 r = 0, g = 0, b = 255, a = 255;
 
-    // محاسبه تمام ابعاد به صورت نسبتی از پارامتر 'size'
-    // این مقادیر اعشاری به عنوان ضرایب مقیاس‌دهی عمل می‌کنند
-    float start_offset_ratio = 0.25f; // فاصله از لبه
-    float end_offset_ratio = 0.75f;   // نقطه پایانی
-    float radius_ratio = 0.1f;        // شعاع دایره‌ها
-    float thickness_ratio = 0.07f;    // ضخامت خط
+    float start_offset_ratio = 0.25f;
+    float end_offset_ratio = 0.75f;
+    float radius_ratio = 0.1f;
+    float thickness_ratio = 0.07f;
 
-    // محاسبه مقادیر نهایی بر حسب پیکسل
     int start_pos = (int)(size * start_offset_ratio);
     int end_pos = (int)(size * end_offset_ratio);
     int radius = (int)(size * radius_ratio);
     int line_thickness = (int)(size * thickness_ratio);
 
-    // اطمینان از اینکه شعاع و ضخامت حداقل ۱ پیکسل باشند
     if (radius < 1) radius = 1;
     if (line_thickness < 1) line_thickness = 1;
 
-    // مختصات نهایی با احتساب موقعیت (x, y)
     int start_x = x + start_pos;
     int start_y = y + start_pos;
     int end_x = x + end_pos;
     int end_y = y + end_pos;
 
-    // 1. رسم خطوط ضخیم
     thickLineRGBA(renderer, start_x, start_y, end_x, start_y, line_thickness, r, g, b, a);
     thickLineRGBA(renderer, end_x, start_y, end_x, end_y, line_thickness, r, g, b, a);
 
-    // 2. رسم دایره توپر
     filledCircleRGBA(renderer, start_x, start_y, radius, r, g, b, a);
 
-    // 3. رسم دایره توخالی
     aacircleRGBA(renderer, end_x, end_y, radius, r, g, b, a);
-    if (radius > 1) { // برای ضخیم‌تر شدن، اگر امکان داشت
+    if (radius > 1) {
         aacircleRGBA(renderer, end_x, end_y, radius - 1, r, g, b, a);
     }
 }
-//برای سورسها که فقط پایه ها میچرخن
+
 void drawRotatableSource(SDL_Renderer* renderer, const string& type, int x, int y, int radius, int rotation, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
     int lead_length = 20;
     double angle = rotation * M_PI / 2.0;
@@ -2424,11 +2790,12 @@ void drawRotatableSource(SDL_Renderer* renderer, const string& type, int x, int 
 
         symbol_points.push_back({10, -5});
         symbol_points.push_back({10, 5});
-        symbol_points.push_back({5, 0});
-        symbol_points.push_back({15, 0});
+
 
         symbol_points.push_back({-11, -6});
         symbol_points.push_back({-11, 6});
+        symbol_points.push_back({-16, 0});
+        symbol_points.push_back({-6, 0});
     }
     else if (type == "SINV") {
 
@@ -2443,7 +2810,18 @@ void drawRotatableSource(SDL_Renderer* renderer, const string& type, int x, int 
         symbol_points.push_back({4, -5});
         symbol_points.push_back({10, 0});
         symbol_points.push_back({4, 5});
+
+    } else if (type == "WFV") {
+        int w = 24, h = 10;
+        int x0 = -w / 2, y0 = 0;
+        symbol_points.push_back({x0, y0});
+        symbol_points.push_back({x0 + w / 3, y0});
+        symbol_points.push_back({x0 + w / 3, y0 - h});
+        symbol_points.push_back({x0 + 2 * w / 3, y0 - h});
+        symbol_points.push_back({x0 + 2 * w / 3, y0});
+        symbol_points.push_back({x0 + w, y0});
     }
+
 
 
     for(auto& pt : symbol_points) {
@@ -2456,15 +2834,18 @@ void drawRotatableSource(SDL_Renderer* renderer, const string& type, int x, int 
 
     if (type == "DCV" || type == "DCI") {
         for (size_t i = 0; i < symbol_points.size(); i += 2) {
-            thickLineRGBA(renderer, symbol_points[i].x, symbol_points[i].y, symbol_points[i+1].x, symbol_points[i+1].y, 2, r, g, b, a);
+            thickLineRGBA(renderer, symbol_points[i].x, symbol_points[i].y,
+                          symbol_points[i+1].x, symbol_points[i+1].y, 2, r, g, b, a);
         }
-    } else if (type == "SINV") {
+    } else if (type == "SINV" || type == "WFV") {
         for (size_t i = 0; i < symbol_points.size() - 1; ++i) {
-            thickLineRGBA(renderer, symbol_points[i].x, symbol_points[i].y, symbol_points[i+1].x, symbol_points[i+1].y, 2, r, g, b, a);
+            thickLineRGBA(renderer, symbol_points[i].x, symbol_points[i].y,
+                          symbol_points[i+1].x, symbol_points[i+1].y, 2, r, g, b, a);
         }
     }
+
 }
-//رسم خطکشی نمودار سیگنال
+
 void drawPlotGrid(SDL_Renderer* renderer, const SDL_Rect& plotArea) {
     SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
 
@@ -2480,7 +2861,6 @@ void drawPlotGrid(SDL_Renderer* renderer, const SDL_Rect& plotArea) {
         SDL_RenderDrawLine(renderer, x, plotArea.y, x, plotArea.y + plotArea.h);
     }
 }
-// تابع جدید برای رسم آیکون حذف (یک ضربدر قرمز)
 void drawDeleteIcon(SDL_Renderer* renderer, int x, int y, int size) {
     Uint8 r = 220, g = 0, b = 0, a = 255; // Red color
     int thickness = size / 6;
@@ -2500,22 +2880,104 @@ void drawDeleteIcon(SDL_Renderer* renderer, int x, int y, int size) {
                   thickness, r, g, b, a);
 }
 
-// تابع کمکی برای محاسبه فاصله یک نقطه تا یک قطعه خط
-// این تابع برای تشخیص کلیک روی سیم‌ها و قطعات خطی استفاده می‌شود
+
 double distanceToLineSegment(int px, int py, int x1, int y1, int x2, int y2) {
     double dx = x2 - x1;
     double dy = y2 - y1;
-    if (dx == 0 && dy == 0) { // The segment is a point
+    if (dx == 0 && dy == 0) {
         return sqrt(pow(px - x1, 2) + pow(py - y1, 2));
     }
     double t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
-    t = max(0.0, min(1.0, t)); // Clamp t to the [0, 1] range
+    t = max(0.0, min(1.0, t));
     double closestX = x1 + t * dx;
     double closestY = y1 + t * dy;
     return sqrt(pow(px - closestX, 2) + pow(py - closestY, 2));
 }
+Node* hitTestNodeAt(int mx, int my, int radius = 10) {
+    for (Node* node : nodes) {
+        if (node->x == -1) continue;
+        double dx = mx - node->x;
+        double dy = my - node->y;
+        if (sqrt(dx*dx + dy*dy) <= radius) return node;
+    }
+    return nullptr;
+}
 
-// تابع جدید برای پیدا کردن یا ساختن گره
+Component* hitTestComponentAt(int mx, int my) {
+    const int R = 10;
+    for (Component* comp : Components) {
+        if (comp->getName().rfind("W_auto_", 0) == 0) continue;
+        Node* n1 = comp->getNode1();
+        Node* n2 = comp->getNode2();
+        if (n1->x == -1 || n2->x == -1) continue;
+        string type = comp->getType();
+        if (type == "DcVoltageSource" || type == "SinVoltageSource" || type == "CurrentSource" || type == "WaveformSource") {
+            int cx = n1->x + (n2->x - n1->x) / 2;
+            int cy = n1->y + (n2->y - n1->y) / 2;
+            double dist = sqrt((mx - cx)*(mx - cx) + (my - cy)*(my - cy));
+            if (dist < 20 + R) return comp;
+        } else {
+            if (distanceToLineSegment(mx, my, n1->x, n1->y, n2->x, n2->y) < R) return comp;
+        }
+    }
+    return nullptr;
+}
+bool isFrequencyDomain = false;
+
+bool addTraceByVar(const string& varName,
+                   map<string, vector<double>>& results,
+                   const vector<double>& tpts)
+{
+    if (results.count(varName)) return true;
+
+    if (!isFrequencyDomain ) {
+        if (varName.size()>3 && varName.front()=='I' && varName[1]=='(' && varName.back()==')') {
+            string cname = varName.substr(2, varName.size()-3);
+            Component* c = findComponent(cname);
+            if (!c) return false;
+            Node* n1 = c->getNode1();
+            Node* n2 = c->getNode2();
+            string v1k = (n1==GN)? "" : ("V(" + n1->getName() + ")");
+            string v2k = (n2==GN)? "" : ("V(" + n2->getName() + ")");
+
+            if (c->getType()=="Resistor") {
+                if ((n1!=GN && !results.count(v1k)) || (n2!=GN && !results.count(v2k))) return false;
+                double R = c->getRes();
+                if (R<=0) return false;
+                vector<double> cur; cur.reserve(tpts.size());
+                for (size_t i=0; i<tpts.size(); ++i) {
+                    double v1 = (n1==GN)? 0.0 : results[v1k][i];
+                    double v2 = (n2==GN)? 0.0 : results[v2k][i];
+                    cur.push_back( (v1 - v2) / R );
+                }
+                results[varName] = std::move(cur);
+                return true;
+            }
+            else if (c->getType()=="Capacitor") {
+                if (tpts.size()<2) return false;
+                if ((n1!=GN && !results.count(v1k)) || (n2!=GN && !results.count(v2k))) return false;
+                double C = c->getCap();
+                vector<double> cur(tpts.size(), 0.0);
+                for (size_t i=1; i<tpts.size(); ++i) {
+                    double dt = tpts[i] - tpts[i-1];
+                    if (dt<=0) dt = 1e-12;
+                    double v1a = (n1==GN)? 0.0 : results[v1k][i];
+                    double v2a = (n2==GN)? 0.0 : results[v2k][i];
+                    double v1b = (n1==GN)? 0.0 : results[v1k][i-1];
+                    double v2b = (n2==GN)? 0.0 : results[v2k][i-1];
+                    double dv = (v1a - v2a) - (v1b - v2b);
+                    cur[i] = C * (dv / dt);
+                }
+                results[varName] = std::move(cur);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
 Node* findOrCreateNodeAt(int x, int y) {
 
     for (Node* node : nodes) {
@@ -2530,7 +2992,7 @@ Node* findOrCreateNodeAt(int x, int y) {
     nodes.push_back(newNode);
     return newNode;
 }
-// تابع جدید برای پردازش سیم ها و تبدیل آنها به مقاومت
+
 void updateCircuitModelFromGUI(Circuit& circuit, const vector<vector<SDL_Point>>& all_wires) {
 
     Components.erase(
@@ -2940,6 +3402,17 @@ public:
         }
     }
 };
+static vector<double> parseCsvDoubles(const string& s) {
+    vector<double> out; out.reserve(32);
+    stringstream ss(s);
+    string item;
+    while (getline(ss, item, ',')) {
+        item.erase(0, item.find_first_not_of(" \t"));
+        item.erase(item.find_last_not_of(" \t") + 1);
+        if (!item.empty()) out.push_back(stod(item));
+    }
+    return out;
+}
 
 bool validateAndUpdateComponent(InputDialog& dialog, Circuit& circuit, SDL_Window* window) {
     Component* comp = dialog.target;
@@ -2973,7 +3446,7 @@ bool validateAndUpdateComponent(InputDialog& dialog, Circuit& circuit, SDL_Windo
     }
 
     if (type == "SinVoltageSource" && dialog.values.size() == 4) {
-        double freq = stod(dialog.values[3]);
+        double freq = circuit.convertToHertz(dialog.values[3]);
         if (freq <= 0) {
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Invalid Value", "Frequency must be positive.", window);
             return false;
@@ -2990,12 +3463,189 @@ bool validateAndUpdateComponent(InputDialog& dialog, Circuit& circuit, SDL_Windo
     else if (type == "SinVoltageSource" && dialog.values.size() == 4) {
         double offset = circuit.convert_to_volts(dialog.values[1]);
         double amp = circuit.convert_to_volts(dialog.values[2]);
-        double freq = stod(dialog.values[3]);
+        double freq = circuit.convertToHertz(dialog.values[3]);
         static_cast<SinVoltageSource*>(comp)->setSinValues(offset, amp, freq);
+    }
+    else if (type == "WaveformSource" && dialog.values.size() == 3) {
+        double step = circuit.convertTosecond(dialog.values[1]);
+        if (step <= 0) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Invalid Value", "Step must be positive.", window);
+            return false;
+        }
+        auto samples = parseCsvDoubles(dialog.values[2]);
+        if (samples.empty()) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Invalid Samples", "Enter at least one numeric sample.",
+                                     window);
+            return false;
+        }
+        static_cast<WaveformSource *>(comp)->setWaveform(samples, step);
     }
 
     return true;
 }
+static const SDL_Color kTracePalette[] = {
+        { 31,119,180,255}, // blue
+        {255,127, 14,255}, // orange
+        { 44,160, 44,255}, // green
+        {214, 39, 40,255}, // red
+        {148,103,189,255}, // purple
+        {140, 86, 75,255}, // brown
+        {227,119,194,255}, // pink
+        {127,127,127,255}, // gray
+        {188,189, 34,255}, // olive
+        { 23,190,207,255}, // cyan
+        {255, 99,132,255}, // bright red
+        { 54,162,235,255}, // bright blue
+        {255,206, 86,255}, // yellow
+        { 75,192,192,255}, // teal
+        {153,102,255,255}, // violet
+        {255,159, 64,255}  // orange2
+};
+static const size_t kTracePaletteSize = sizeof(kTracePalette)/sizeof(kTracePalette[0]);
+static size_t gTracePaletteIndex = 0;
+
+static SDL_Color nextPaletteColor() {
+    SDL_Color c = kTracePalette[gTracePaletteIndex % kTracePaletteSize];
+    gTracePaletteIndex++;
+    return c;
+}
+vector<SDL_Point> currentWirePoints;
+vector<vector<SDL_Point>> all_wires;
+void clearCircuit() {
+    for (Component* comp : Components) {
+        delete comp;
+    }
+    Components.clear();
+
+    for (Node* node : nodes) {
+        delete node;
+    }
+    nodes.clear();
+
+    all_wires.clear();
+
+    GN = nullptr;
+    Node_count = 0;
+
+
+}
+
+bool saveProjectToFile(const string& path) {
+    ofstream outFile(path);
+    if (!outFile) {
+        cerr << "Error: Could not open file for writing: " << path << endl;
+        return false;
+    }
+    outFile << "CIRCUIT_SIM_V1.0\n";
+
+    outFile << "[NODES]\n";
+    for (auto* n : nodes) {
+        outFile << n->getName() << " " << n->x << " " << n->y << "\n";
+    }
+    outFile << "[END_NODES]\n\n";
+
+    if (GN) {
+        outFile << "[GND]\n" << GN->getName() << "\n[END_GND]\n\n";
+    }
+    outFile << "[WIRES]\n";
+    for (const auto& w : all_wires) {
+        outFile << "W";
+        for (auto p : w) {
+            outFile << " " << p.x << " " << p.y;
+        }
+        outFile << "\n";
+    }
+    outFile << "[END_WIRES]\n\n";
+
+    outFile << "[COMPONENTS]\n";
+    for (auto* c : Components) {
+        if (c->getName().rfind("W_auto_", 0) == 0) continue;
+
+        outFile << c->getType() << " " << c->getName() << " "
+                << c->getNode1()->getName() << " " << c->getNode2()->getName();
+
+        string t = c->getType();
+        if (t == "Resistor" || t == "Capacitor" || t == "Inductor" || t == "DcVoltageSource" || t == "CurrentSource") {
+            outFile << " " << fixed << setprecision(12) << c->getvalue();
+        } else if (t == "SinVoltageSource") {
+            auto* s = static_cast<SinVoltageSource*>(c);
+            outFile << " " << fixed << setprecision(12) << s->getOffset()
+                    << " " << fixed << setprecision(12) << s->getAmplitude()
+                    << " " << fixed << setprecision(12) << s->getFrequency();
+        } else if (t == "Diode") {
+            auto* d = static_cast<Diode*>(c);
+            outFile << " " << d->getModelName();
+        }
+        outFile << "\n";
+    }
+    outFile << "[END_COMPONENTS]\n";
+
+    cout << "Circuit saved to " << path << endl;
+    return true;
+}
+
+bool loadCircuitFromFile(const string& path, Circuit& circuit) {
+    ifstream inFile(path);
+    if (!inFile) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Could not open file.", NULL);
+        return false;
+    }
+
+    clearCircuit();
+
+    string line;
+    getline(inFile, line);
+    if (line.find("CIRCUIT_SIM_V1.0") == string::npos) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Invalid file format.", NULL);
+        return false;
+    }
+
+    string section = "";
+    while (getline(inFile, line)) {
+        if (line.empty()) continue;
+        if (line[0] == '[') {
+            section = line;
+            continue;
+        }
+
+        stringstream ss(line);
+        if (section == "[NODES]") {
+            string name; int x, y;
+            ss >> name >> x >> y;
+            nodes.push_back(new Node(name, Node_count++, x, y));
+        }
+        else if (section == "[GND]") {
+            circuit.add_ground_node(line);
+        }
+        else if (section == "[WIRES]") {
+            string w_keyword; ss >> w_keyword;
+            vector<SDL_Point> wire_points;
+            int x, y;
+            while(ss >> x >> y) wire_points.push_back({x,y});
+            if(!wire_points.empty()) all_wires.push_back(wire_points);
+        }
+        else if (section == "[COMPONENTS]") {
+            string type, name, n1_name, n2_name;
+            ss >> type >> name >> n1_name >> n2_name;
+            string val1, val2, val3;
+            if (type == "Resistor") { ss >> val1; circuit.add_resistor(name, n1_name, n2_name, val1); }
+            else if (type == "Capacitor") { ss >> val1; circuit.add_capacitor(name, n1_name, n2_name, val1); }
+            else if (type == "Inductor") { ss >> val1; circuit.add_inductor(name, n1_name, n2_name, val1); }
+            else if (type == "DcVoltageSource") { ss >> val1; circuit.add_dc_voltage_source(name, n1_name, n2_name, val1); }
+            else if (type == "CurrentSource") { ss >> val1; circuit.add_current_source(name, n1_name, n2_name, val1); }
+            else if (type == "Diode") { ss >> val1; circuit.add_diode(name, n1_name, n2_name, val1); }
+            else if (type == "SinVoltageSource") { ss >> val1 >> val2 >> val3; circuit.add_sin_voltage_source(name, n1_name, n2_name, val1, val2, val3); }
+        }
+    }
+    updateCircuitModelFromGUI(circuit, all_wires);
+    cleanupOrphanedNodes();
+
+    return true;
+}
+
+
+
+
 int SDL_main(int argc, char* argv[])
 {
 
@@ -3025,10 +3675,9 @@ int SDL_main(int argc, char* argv[])
         return -1;
     }
 
-    //POPUP FOR PLOT:
-    //صفحه باز میکنه تا نمودار رو ببینیم
     SDL_Window* plotWindow = nullptr;
     SDL_Renderer* plotRenderer = nullptr;
+
 
     AnalysisDialog analysisDialog;
     Circuit Circuit;
@@ -3046,15 +3695,15 @@ int SDL_main(int argc, char* argv[])
     SDL_Rect mathInput1Rect, mathInput2Rect;
     SDL_Rect plusButtonRect, minusButtonRect, multiplyButtonRect, divideButtonRect;
 
-    //این برای دابل کرزر هستش
+
     bool isDoubleCursorActive = false;
     int doubleCursorState = -1;
     double c_t1 = 0, c_v1 = 0, c_t2 = 0, c_v2 = 0;
+    bool c1IsCurrent = false, c2IsCurrent = false;
 
-    bool isDeleteMode = false; //  متغیر جدید برای حالت حذف
-    bool isWiringMode = false;              // برای فعال/غیرفعال کردن حالت سیم‌کشی
-    vector<SDL_Point> currentWirePoints;    // نقاط سیم در حال رسم
-    vector<vector<SDL_Point>> all_wires;    // برای ذخیره تمام سیم‌های کشیده شده
+    bool isDeleteMode = false;
+    bool isWiringMode = false;
+
 
     auto findNodeAt = [&](int x, int y) -> Node* {
         for (Node* node : nodes) {
@@ -3064,8 +3713,13 @@ int SDL_main(int argc, char* argv[])
         }
         return nullptr;
     };
-    //این یه سیگنال نمونه هست، برای راحتی کار این رو اینجا گذاشتیم که بتونیم همیشه یه سیگنال ببینیم و تغییرات رو مشاهده کنیم
-    //در آخر که کد کامل شد این تیکه رو پاک میکنیم ولی فعلا اگه کد رو اجرا کنی این تیکه ران میشه و یه سیگنال پالس نشون میده
+
+
+    bool isProbeMode = false;
+    string currentFilePath = "";
+    SDL_Rect addTraceRect;
+
+
     vector<double> time_points;
     map<string, vector<double>> temp_sim_results;
     map<string, SDL_Color> trace_colors;
@@ -3095,7 +3749,7 @@ int SDL_main(int argc, char* argv[])
        }
    */
 
-
+/*
     plotWindow = SDL_CreateWindow(
             "Signal Viewer",
             SDL_WINDOWPOS_CENTERED,
@@ -3115,19 +3769,83 @@ int SDL_main(int argc, char* argv[])
         SDL_DestroyWindow(plotWindow);
         plotWindow = nullptr;
     }
+*/
+
+
+
 
     TTF_Font* font = TTF_OpenFont("font.ttf", 12);
 
     SDL_Rect plotToolbarRect, plotArea, Auto_zoom, cursor_button_rect, double_cursor_rect, mathButtonRect, mathPanelRect;
-    //برای ناحیه کناری سیگنال
-    SDL_Rect  plot_sidebar;
+    SDL_Rect plot_sidebar;
     double minTime = 0, maxTime = 0, minVoltage = 0, maxVoltage = 0;
+
+    auto layoutPlotWindow = [&]() {
+        if (!plotWindow) return;
+        int plotW, plotH;
+        SDL_GetWindowSize(plotWindow, &plotW, &plotH);
+
+        const int sidebarWidth = 250;
+        plotToolbarRect = {0, 0, plotW, 40};
+        plotArea        = {60, plotToolbarRect.h + 20, plotW - sidebarWidth - 80, plotH - plotToolbarRect.h - 60};
+        plot_sidebar    = {plotArea.x + plotArea.w + 20, plotToolbarRect.h + 20, sidebarWidth, plotH - plotToolbarRect.h - 40};
+
+        Auto_zoom          = {10, 5, 45, 30};
+        cursor_button_rect = {Auto_zoom.x + Auto_zoom.w + 10, 5, 53, 30};
+        double_cursor_rect = {cursor_button_rect.x + cursor_button_rect.w + 10, 5, 90, 30};
+        mathButtonRect     = {double_cursor_rect.x + double_cursor_rect.w + 10, 5, 50, 30};
+        addTraceRect       = {mathButtonRect.x + mathButtonRect.w + 10, 5, 90, 30};
+    };
+    double view_minT = minTime;
+    double view_maxT = maxTime;
+    double view_minV = minVoltage;
+    double view_maxV = maxVoltage;
+    auto resetPlotViewFromVisibleTraces = [&]() {
+        if (trace_colors.empty()) return;
+        if (!time_points.empty()) {
+            minTime = time_points.front();
+            maxTime = time_points.back();
+        }
+        bool first = true;
+        for (const auto& kv : trace_colors) {
+            const auto& name = kv.first;
+            if (!temp_sim_results.count(name)) continue;
+            const auto& vec = temp_sim_results.at(name);
+            for (double v : vec) {
+                if (first) { minVoltage = maxVoltage = v; first = false; }
+                else { if (v < minVoltage) minVoltage = v; if (v > maxVoltage) maxVoltage = v; }
+            }
+        }
+        if (minVoltage == maxVoltage) {
+            double pad = (fabs(minVoltage) > 1e-9) ? fabs(minVoltage)*0.1 : 1.0;
+            minVoltage -= pad; maxVoltage += pad;
+        }
+        view_minT = minTime; view_maxT = maxTime;
+        view_minV = minVoltage; view_maxV = maxVoltage;
+    };
+
+    auto ensurePlotWindow = [&]() {
+        if (plotWindow) return;
+        plotWindow = SDL_CreateWindow("Signal Viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                      1100, 600, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+        if (!plotWindow) {
+            std::cerr << "Error: Plot window could not be created! SDL_Error: " << SDL_GetError() << std::endl;
+            return;
+        }
+        plotRenderer = SDL_CreateRenderer(plotWindow, -1, SDL_RENDERER_ACCELERATED);
+        if (!plotRenderer) {
+            std::cerr << "Error: Plot renderer could not be created! SDL_Error: " << SDL_GetError() << std::endl;
+            SDL_DestroyWindow(plotWindow);
+            plotWindow = nullptr;
+            return;
+        }
+        layoutPlotWindow();
+    };
 
     if (plotWindow && !temp_sim_results.empty()) {
 
         int plotW, plotH;
         SDL_GetWindowSize(plotWindow, &plotW, &plotH);
-        //تول بار برای قسمت نمودار
         const int sidebarWidth = 250;
 
         plotToolbarRect = {0, 0, plotW, 40};
@@ -3139,6 +3857,7 @@ int SDL_main(int argc, char* argv[])
         cursor_button_rect = {Auto_zoom.x + Auto_zoom.w + 10, 5, 53, 30};
         double_cursor_rect = {cursor_button_rect.x + cursor_button_rect.w + 10, 5, 90, 30};
         mathButtonRect = {double_cursor_rect.x + double_cursor_rect.w + 10, 5, 50, 30};
+        addTraceRect = { mathButtonRect.x + mathButtonRect.w + 10, 5, 90, 30 };
 
         if (!time_points.empty()) {
             minTime = time_points.front();
@@ -3159,19 +3878,7 @@ int SDL_main(int argc, char* argv[])
             maxVoltage += padding;
         }
     }
-    //اینا برای زوم استفاده شدن، اورجینال ها رو برابر این ویوها قرار میدیم و بعدا با زوم این ویوها رو عوض میکنیم
-    //حالا اون بخش AUTO رو هم اینجوری زدیم که هروقت روی اون دکمه زدیم این مقادیر ویو هرچی باشه برمیگردونه به مقادیر اورجینالش
-    double view_minT = minTime;
-    double view_maxT = maxTime;
-    double view_minV = minVoltage;
-    double view_maxV = maxVoltage;
 
-
-
-
-
-    //اینا رو برای قسمت cursor تو plot زدم، اول میایم توی اون پنجره حرکت موس رو track میکنیم
-    //منفی 1 گذاشتیم یعنی که موس هنوز تو ویندو پلات نیست هنوز
     int mouse_x_plot = -1;
     int mouse_y_plot = -1;
     int R_count = 1, C_count = 1, L_count = 1, D_count = 1;
@@ -3191,23 +3898,15 @@ int SDL_main(int argc, char* argv[])
             if (analysisDialog.result == AnalysisDialog::Result::RunTransient) {
                 analysisDialog.result = AnalysisDialog::Result::None;
 
-
                 double t_stop = Circuit.convertTosecond(analysisDialog.tran_stop_time);
                 double t_start = Circuit.convertTosecond(analysisDialog.tran_start_time);
                 double t_step = Circuit.convertTosecond(analysisDialog.tran_timestep);
 
-
                 if (t_step <= 0 || t_stop <= t_start) {
-
                     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Analysis Error", "Invalid transient analysis parameters.", window);
                 } else {
-
                     vector<string> vars_to_print;
-                    for (Node* n : nodes) {
-                        if (n != GN) {
-                            vars_to_print.push_back("V(" + n->getName() + ")");
-                        }
-                    }
+                    for (Node* n : nodes) if (n != GN) vars_to_print.push_back("V(" + n->getName() + ")");
                     for (Component* c : Components) {
                         string type = c->getType();
                         if (type == "DcVoltageSource" || type == "SinVoltageSource" || type == "Inductor") {
@@ -3215,17 +3914,42 @@ int SDL_main(int argc, char* argv[])
                         }
                     }
 
-                    if (vars_to_print.empty()) {
-
-                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Analysis Warning", "There are no nodes in the circuit to analyze.", window);
-                    } else {
-
-                        cout << "\n--- Starting Transient Analysis ---" << endl;
-                        Circuit.performTransientAnalysis(t_step, t_stop, t_start, vars_to_print);
-                        cout << "--- Transient Analysis Finished ---\n" << endl;
+                    time_points.clear();
+                    temp_sim_results = Circuit.runTransientAnalysis(t_step, t_stop, t_start, vars_to_print, time_points);
+                    if (temp_sim_results.empty()) {
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Simulation", "Analysis failed (singular matrix or no convergence).", window);
+                    }
+                    else {
+                        trace_colors.clear();
+                        isProbeMode = true;
+                        isFrequencyDomain = false;
+                        gTracePaletteIndex = 0;
                     }
                 }
             }
+            if (analysisDialog.result == AnalysisDialog::Result::RunAC) {
+                analysisDialog.result = AnalysisDialog::Result::None;
+
+                int sweepType = analysisDialog.ac_sweep_type; // 0 Oct, 1 Dec, 2 Lin
+                double fstart = atof(analysisDialog.ac_start_freq.c_str());
+                double fstop  = atof(analysisDialog.ac_stop_freq.c_str());
+                int npoints   = atoi(analysisDialog.ac_points.c_str());
+
+                time_points.clear();
+                temp_sim_results = Circuit.runACAnalysis(fstart, fstop, npoints, sweepType, time_points);
+                if (temp_sim_results.empty()) {
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "AC Analysis", "AC analysis failed.", window);
+                }
+                else {
+                    trace_colors.clear();
+                    isProbeMode = true;
+                    isFrequencyDomain = true;
+                    gTracePaletteIndex = 0;
+
+                }
+            }
+
+
             if (InputDialog.active) {
                 if (event.type == SDL_KEYDOWN) {
                     if (event.key.keysym.sym == SDLK_TAB) {
@@ -3348,8 +4072,14 @@ int SDL_main(int argc, char* argv[])
                     if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
                         is_running = false;
                     }
+                    if (plotWindow && event.window.windowID == SDL_GetWindowID(plotWindow)) {
+                        if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                            event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                            layoutPlotWindow();
+                        }
+                    }
                 }
-                //برای زوم
+
                 if (event.type == SDL_MOUSEWHEEL) {
                     if (plotWindow && event.wheel.windowID == SDL_GetWindowID(plotWindow)) {
                         double zoomFactor = (event.wheel.y > 0) ? 1.15 : (1.0 / 1.15);
@@ -3389,7 +4119,7 @@ int SDL_main(int argc, char* argv[])
                     }
                 }
 
-                //برای حرکت موس در پنجره
+
                 if (event.type == SDL_MOUSEMOTION) {
                     if (plotWindow && event.motion.windowID == SDL_GetWindowID(plotWindow)) {
                         mouse_x_plot = event.motion.x;
@@ -3402,13 +4132,59 @@ int SDL_main(int argc, char* argv[])
                     SDL_GetMouseState(&mouseX_click, &mouseY_click);
                     SDL_Point clickPoint = {mouseX_click, mouseY_click};
 
-                    int delete_icon_x =  (40 + 25) * 6; // یک موقعیت مثال
+                    int delete_icon_x =  (40 + 25) * 6;
                     SDL_Rect deleteIconRect = {delete_icon_x, 5, 40, 40};
 
+                    int new_icon_x = 20;
+                    int new_icon_size = 40;
+                    SDL_Rect newFileRect = {new_icon_x, 5, new_icon_size, new_icon_size};
+
+
+                    int open_icon_x = new_icon_x + new_icon_size + 25;
+                    int open_icon_width = (int)(40 / 0.90);
+                    SDL_Rect openFileRect = {open_icon_x, 5, open_icon_width, 40};
+
+
+                    int save_icon_x = open_icon_x + open_icon_width + 25;
+                    int save_icon_size = 40;
+                    SDL_Rect saveFileRect = {save_icon_x, 5, save_icon_size, 40};
+
+                    if (SDL_PointInRect(&clickPoint, &newFileRect)) {
+                        clearCircuit();
+                        currentFilePath = "";
+                    }
+
+                    if (SDL_PointInRect(&clickPoint, &openFileRect)) {
+                        HWND hwnd = getHWND(window);
+                        string path = pickOpenPath(hwnd);
+                        if (!path.empty()) {
+                            if (loadCircuitFromFile(path, Circuit)) {
+                                currentFilePath = path;
+                            }
+                        }
+                    }
+
+                    if (SDL_PointInRect(&clickPoint, &saveFileRect)) {
+                        string path_to_save = currentFilePath;
+
+
+                        if (path_to_save.empty()) {
+                            HWND hwnd = getHWND(window);
+                            path_to_save = pickSavePath(hwnd, "ckt");
+                        }
+
+                        if (!path_to_save.empty()) {
+                            if (saveProjectToFile(path_to_save)) {
+                                currentFilePath = path_to_save;
+                            }
+                        }
+                    }
+
+
                     if (SDL_PointInRect(&clickPoint, &deleteIconRect)) {
-                        isDeleteMode = !isDeleteMode; // وضعیت حالت حذف را تغییر بده
+                        isDeleteMode = !isDeleteMode;
                         if (isDeleteMode) {
-                            // هنگام ورود به حالت حذف، حالت های دیگر را غیرفعال کن
+
                             isWiringMode = false;
                             componentToPlace = "";
                             isComponentMenuOpen = false;
@@ -3416,9 +4192,8 @@ int SDL_main(int argc, char* argv[])
                         }
                     }
 
-                    // محدوده آیکون کامپوننت را دوباره اینجا تعریف می‌کنیم تا کلیک را تشخیص دهیم
-                    // این مقادیر باید با مقادیر بخش رسم هماهنگ باشند
-                    int temp_x = 20 + (40 + 25) * 4; // محاسبه موقت موقعیت x آیکون کامپوننت
+
+                    int temp_x = 20 + (40 + 25) * 4;
                     int comp_h = 40;
                     int comp_w = comp_h * 0.7;
                     int comp_pin_len = comp_w / 5;
@@ -3436,7 +4211,7 @@ int SDL_main(int argc, char* argv[])
                     }
                     if (SDL_PointInRect(&clickPoint, &componentClickRect)) {
                         isComponentMenuOpen = !isComponentMenuOpen;
-                        isWiringMode = false; // از حالت سیم کشی خارج شو
+                        isWiringMode = false;
                         currentWirePoints.clear();
                     }
                     int play_icon_x = 20 + (40+25)*3;
@@ -3448,6 +4223,7 @@ int SDL_main(int argc, char* argv[])
 
                         analysisDialog.setup();
                     }
+
                     if (plotWindow && event.button.windowID == SDL_GetWindowID(plotWindow)) {
                         if (event.button.clicks == 2) {
                             cout << "Double click detected in plot window!" << endl;
@@ -3457,12 +4233,9 @@ int SDL_main(int argc, char* argv[])
                             SDL_GetMouseState(&m_x, &m_y);
                             SDL_Point mousePoint = {m_x, m_y};
                             if (SDL_PointInRect(&mousePoint, &Auto_zoom)) {
-                                view_minT = minTime;
-                                view_maxT = maxTime;
-                                view_minV = minVoltage;
-                                view_maxV = maxVoltage;
+                                resetPlotViewFromVisibleTraces();
                             }
-                            //برای دکمه cursor زدم
+
                             if (SDL_PointInRect(&mousePoint, &cursor_button_rect)) {
                                 cursor_state = !cursor_state;
                             }
@@ -3471,10 +4244,17 @@ int SDL_main(int argc, char* argv[])
                                 cursor_state = false;
                                 doubleCursorState = -1;
                             }
-                                //برای عملیت ریاضی
+                            else if (SDL_PointInRect(&mousePoint, &addTraceRect)) {
+                                if (time_points.empty() || temp_sim_results.empty()) {
+                                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Add Trace", "ابتدا یک تحلیل اجرا کنید.", window);
+                                } else {
+                                    isProbeMode = true;
+                                }
+                            }
+
                             else if (SDL_PointInRect(&mousePoint, &mathButtonRect)) {
                                 panjare_math = !panjare_math;
-                                //برای خوندن نوشته تو قسمتایmath سیگنال
+
                                 if (panjare_math) {
                                     SDL_StartTextInput();
                                 }
@@ -3523,11 +4303,13 @@ int SDL_main(int argc, char* argv[])
                                     if (doubleCursorState != 0) {
                                         c_t1 = time_points[closest_index];
                                         c_v1 = temp_sim_results.at(closestSignalName)[closest_index];
+                                        c1IsCurrent = (closestSignalName.rfind("I(", 0) == 0);
                                         doubleCursorState = 0;
                                     }
                                     else {
                                         c_t2 = time_points[closest_index];
                                         c_v2 = temp_sim_results.at(closestSignalName)[closest_index];
+                                        c2IsCurrent = (closestSignalName.rfind("I(", 0) == 0);
                                         doubleCursorState = 1;
                                     }
                                 }
@@ -3556,9 +4338,58 @@ int SDL_main(int argc, char* argv[])
                             }
                         }
                     }
+                    else if (isProbeMode) {
+                        bool added = false;
+
+
+                        bool additive = (SDL_GetModState() & KMOD_SHIFT) != 0;
+
+                        Node* nn = hitTestNodeAt(mouseX_click, mouseY_click, 10);
+                        if (nn != nullptr) {
+                            std::string vkey = "V(" + nn->getName() + ")";
+
+
+                            if (trace_colors.count(vkey)) {
+                                trace_colors.erase(vkey);
+                            }
+                            else {
+                                trace_colors[vkey] = nextPaletteColor();
+                            }
+                            added = true;
+                        } else {
+                            Component* cc = hitTestComponentAt(mouseX_click, mouseY_click);
+                            if (cc != nullptr) {
+                                std::string ikey = "I(" + cc->getName() + ")";
+                                if (addTraceByVar(ikey, temp_sim_results, time_points)) {
+                                    if (trace_colors.count(ikey)) {
+                                        trace_colors.erase(ikey);
+                                    }
+                                    else {
+                                        trace_colors[ikey] = nextPaletteColor();
+                                    }
+                                    added = true;
+                                }
+                            }
+                        }
+
+                        if (added) {
+                            ensurePlotWindow();
+                            layoutPlotWindow();
+                            resetPlotViewFromVisibleTraces();
+
+
+                            if (!additive) {
+                                isProbeMode = false;
+                            }
+                            continue;
+                        }
+                    }
+
+
+
                     else if (isDeleteMode) {
                         bool itemDeleted = false;
-                        //شعاع کلیک
+
                         const int R = 10;
                         if (GN != nullptr && GN->x != -1) {
 
@@ -3603,9 +4434,7 @@ int SDL_main(int argc, char* argv[])
                             }
 
                             if (isClicked) {
-                                // قطعه را از کلاس Circuit حذف کن
-                                // نکته: توابع deleteResistor و غیره فقط از وکتور حذف می‌کنند و حافظه را آزاد می‌کنند.
-                                // ما اینجا از findComponent برای اطمینان استفاده می‌کنیم.
+
                                 if (findComponent(comp->getName())) {
                                     if(type == "Resistor") Circuit.deleteResistor(comp->getName());
                                     else if(type == "Capacitor") Circuit.deleteCapacitor(comp->getName());
@@ -3645,7 +4474,7 @@ int SDL_main(int argc, char* argv[])
 
                     }
                     else {
-                        //  اگر در حالت جایگذاری یک قطعه هستیم، آن را روی صفحه قرار بده
+
                         if (!componentToPlace.empty()) {
                             if (mouseY_click > 50 && !(isComponentMenuOpen && mouseX_click < 200)) {
                                 if (componentToPlace == "GND") {
@@ -3725,6 +4554,17 @@ int SDL_main(int argc, char* argv[])
                                         name = "I" + to_string(I_count++);
                                         Circuit.add_current_source(name, n1->getName(), n2->getName(), "1A");
                                     }
+                                    else if (componentToPlace == "WFV") {
+                                        name = "V" + to_string(V_count++);
+
+                                        vector<double> default_values;
+                                        for (int i = 0; i < 200; ++i) {
+                                            default_values.push_back(i < 100 ? 5.0 : 0.0);
+                                        }
+                                        double default_time_step = 0.01;
+
+                                        Circuit.add_waveform_source(name, n1->getName(), n2->getName(), default_values, default_time_step);
+                                    }
 
                                     Component* newComp = findComponent(name);
                                     if (newComp) {
@@ -3742,7 +4582,7 @@ int SDL_main(int argc, char* argv[])
                             }
                         }
                         else {
-                            //برسی کلیلک ها
+
                             if (isComponentMenuOpen) {
                                 int item_x = 10, current_y = 60, item_h = 70;
                                 if (clickPoint.x > item_x && clickPoint.x < item_x + 180) {
@@ -3792,7 +4632,7 @@ int SDL_main(int argc, char* argv[])
                 }
                 if (event.type == SDL_KEYDOWN) {
                     if (!componentToPlace.empty()) {
-                        //چرخش قطعه
+
                         if (event.key.keysym.sym == SDLK_r) {
                             componentRotation = (componentRotation + 1) % 4;
                         }
@@ -3876,6 +4716,11 @@ int SDL_main(int argc, char* argv[])
                         isComponentMenuOpen = false;
                     }
 
+                    if (event.key.keysym.sym == SDLK_w) {
+                        componentToPlace = "WFV";
+                        isComponentMenuOpen = false;
+                    }
+
 
 
                 }
@@ -3892,7 +4737,7 @@ int SDL_main(int argc, char* argv[])
                     else if (SDL_PointInRect(&clickPoint, &mathInput2Rect)) {
                         mathhfield = 1;
                     }
-                        //برای عملیات ریاضی هست
+
                     else if (SDL_PointInRect(&clickPoint, &plusButtonRect)) {
                         if (temp_sim_results.count(math_input1) && temp_sim_results.count(math_input2)) {
                             vector<double>& sig1 = temp_sim_results.at(math_input1);
@@ -3903,7 +4748,7 @@ int SDL_main(int argc, char* argv[])
 
                                 string newName = "(" + math_input1 + ")+(" + math_input2 + ")";
                                 temp_sim_results[newName] = newSignal;
-                                trace_colors[newName] = {255, 100, 255, 255}; // Magenta
+                                trace_colors[newName] = nextPaletteColor();
 
                                 panjare_math = false;
                                 SDL_StopTextInput();
@@ -3924,7 +4769,7 @@ int SDL_main(int argc, char* argv[])
 
                                 string newName = "(" + math_input1 + ")-(" + math_input2 + ")";
                                 temp_sim_results[newName] = newSignal;
-                                trace_colors[newName] = {255, 255 ,100, 255};
+                                trace_colors[newName] = nextPaletteColor();
 
                                 panjare_math = false;
                                 SDL_StopTextInput();
@@ -3944,7 +4789,7 @@ int SDL_main(int argc, char* argv[])
                                 }
                                 string newName = "(" + math_input1 + ") * (" + math_input2 + ")";
                                 temp_sim_results[newName] = newSignal;
-                                trace_colors[newName] = {0, 128 ,128, 255};
+                                trace_colors[newName] = nextPaletteColor();
                                 panjare_math = false;
                                 SDL_StopTextInput();
                             }
@@ -3964,7 +4809,7 @@ int SDL_main(int argc, char* argv[])
 
                                 string newName = "(" + math_input1 + ") / (" + math_input2 + ")";
                                 temp_sim_results[newName] = newSignal;
-                                trace_colors[newName] = {128, 0 ,0, 255};
+                                trace_colors[newName] = nextPaletteColor();
                                 panjare_math = false;
                                 SDL_StopTextInput();
                             }
@@ -4008,10 +4853,10 @@ int SDL_main(int argc, char* argv[])
         draw_grid(renderer);
         FilledRect(renderer, 0 , 0, 1600, 50, 255, 255, 255);
 
-        // رسم جایگذاری شذه
+
         SDL_Color componentTextColor = {200, 200, 200, 255}; // A light gray color
 
-// رسم قطعات جایگذاری شده
+
         for (Component* comp : Components) {
             if (comp->getName().rfind("W_auto_", 0) == 0) {
                 continue;
@@ -4061,6 +4906,9 @@ int SDL_main(int argc, char* argv[])
                 else if (compType == "CurrentSource") {
                     drawRotatableSource(renderer, "DCI", center_x, center_y, 20, rotation_idx, r,g,b,a);
                 }
+                else if (compType == "WaveformSource") {
+                    drawRotatableSource(renderer, "WFV", center_x, center_y, 20, rotation_idx, r, g, b, a);
+                }
 
 
                 if (font) {
@@ -4083,7 +4931,7 @@ int SDL_main(int argc, char* argv[])
 
 
                     }
-                    else { // Vertical
+                    else {
 
                         int gap = 5;
                         int total_text_height = text_h_name + gap + text_h_value;
@@ -4349,6 +5197,7 @@ int SDL_main(int argc, char* argv[])
                 FilledRect(renderer, gndRect.x, gndRect.y, gndRect.w, gndRect.h, hover_color[0], hover_color[1], hover_color[2]);
             }
 
+
             drawGndIcon(renderer, item_x + 45, current_y, 30, icon_color[0], icon_color[1], icon_color[2], icon_color[3]);
 
         }
@@ -4388,14 +5237,13 @@ int SDL_main(int argc, char* argv[])
                        cursor_bg_r, 80, 80);
             drawText(plotRenderer, font, "Cursor", cursor_button_rect.x + 8, cursor_button_rect.y + 7,
                      {255, 255, 255, 255});
-            //رسم دابل کرزر باتن!
+
 
 
             FilledRect(plotRenderer, double_cursor_rect.x, double_cursor_rect.y, double_cursor_rect.w, double_cursor_rect.h, 80, 80, 80);
             drawText(plotRenderer, font, "Double Cursor", double_cursor_rect.x + 8, double_cursor_rect.y + 7, {255, 255, 255, 255});
-            //
-            //برای math میزنیم
-            Uint8 math_bg_r = panjare_math ? 120 : 80; // Highlight if active
+
+            Uint8 math_bg_r = panjare_math ? 120 : 80;
             FilledRect(plotRenderer, mathButtonRect.x, mathButtonRect.y, mathButtonRect.w, mathButtonRect.h, math_bg_r, 80, 80);
             drawText(plotRenderer, font, "Math", mathButtonRect.x + 10, mathButtonRect.y + 7, {255, 255, 255, 255});
             drawPlotGrid(plotRenderer, plotArea);
@@ -4403,10 +5251,12 @@ int SDL_main(int argc, char* argv[])
 
             drawAxes(plotRenderer, font, plotArea, view_minT, view_maxT, view_minV, view_maxV);
 
-            //بعد از این که Math تکمیل شد یه ساید بار زدم که صرفا میاد سیگنال های موجود با رنگ ها رو نشون میده
+
             FilledRect(plotRenderer, plot_sidebar.x, plot_sidebar.y, plot_sidebar.w, plot_sidebar.h, 0, 0, 0, 255);
 
             drawText(plotRenderer, font, "Traces:", plot_sidebar.x + 10, plot_sidebar.y + 5, {255, 255, 255, 255});
+            FilledRect(plotRenderer, addTraceRect.x, addTraceRect.y, addTraceRect.w, addTraceRect.h, 80, 80, 80);
+            drawText(plotRenderer, font, "Add Trace", addTraceRect.x + 8, addTraceRect.y + 7, {255,255,255,255});
 
             int sidebar_item_position = plot_sidebar.y + 30;
             for (auto const& pair : trace_colors) {
@@ -4420,27 +5270,15 @@ int SDL_main(int argc, char* argv[])
                 sidebar_item_position += 20;
             }
 
-            if (temp_sim_results.count("V(n1)")) {
-                SDL_SetRenderDrawColor(plotRenderer, 100, 255, 100, 255); // V(n1) is ALWAYS green
-                drawSignal(plotRenderer, time_points, temp_sim_results.at("V(n1)"), plotArea, view_minT, view_maxT, view_minV, view_maxV);
+            for (const auto& kv : trace_colors) {
+                const string& name = kv.first;
+                if (!temp_sim_results.count(name)) continue;
+                const SDL_Color& color = kv.second;
+                SDL_SetRenderDrawColor(plotRenderer, color.r, color.g, color.b, color.a);
+                drawSignal(plotRenderer, time_points, temp_sim_results.at(name),
+                           plotArea, view_minT, view_maxT, view_minV, view_maxV);
             }
 
-
-            if (temp_sim_results.count("V(n2)")) {
-                SDL_SetRenderDrawColor(plotRenderer, 100, 100, 255, 255); // V(n2) is ALWAYS blue
-                drawSignal(plotRenderer, time_points, temp_sim_results.at("V(n2)"), plotArea, view_minT, view_maxT, view_minV, view_maxV);
-            }
-            //برای کشیدن فانکشن های ریاضی با رنگ خودشون
-            for (map<string, vector<double>>::const_iterator it = temp_sim_results.begin(); it != temp_sim_results.end(); ++it) {
-                const string& name = it->first;
-                const vector<double>& signalVector = it->second;
-
-                SDL_Color signalColor = trace_colors[name];
-
-                SDL_SetRenderDrawColor(plotRenderer, signalColor.r, signalColor.g, signalColor.b, signalColor.a);
-
-                drawSignal(plotRenderer, time_points, signalVector, plotArea, view_minT, view_maxT, view_minV, view_maxV);
-            }
 
             if(cursor_state) {
                 if (mouse_x_plot >= plotArea.x && mouse_x_plot <= plotArea.x + plotArea.w &&
@@ -4481,12 +5319,18 @@ int SDL_main(int argc, char* argv[])
 
                     if (!closestSignalName.empty()) {
                         stringstream ss;
-                        ss << closestSignalName << " Time: " << fixed << setprecision(4) << timeAtCursor << "s";
+                        bool isCurrentTrace = (!closestSignalName.empty() && closestSignalName.rfind("I(", 0) == 0);
+                        const char* xLbl  = isFrequencyDomain ? "Freq" : "Time";
+                        const char* xUnit = isFrequencyDomain ? "Hz"   : "s";
+                        const char* yLbl  = isFrequencyDomain ? "Mag"  : "Value";
+                        const char* yUnit = isCurrentTrace    ? "A"    : "V";
+
+                        ss << closestSignalName << " " << xLbl << ": " << fixed << setprecision(4) << timeAtCursor << xUnit;
                         int plotW, plotH;
                         SDL_GetWindowSize(plotWindow, &plotW, &plotH);
                         drawText(plotRenderer, font, ss.str(), plotW - 200, plotH - 70, {255, 255, 0, 255});
                         ss.str("");
-                        ss << "Voltage: " << fixed << setprecision(4) << closestVoltage << "V";
+                        ss << yLbl << ": " << fixed << setprecision(4) << closestVoltage << yUnit;
                         drawText(plotRenderer, font, ss.str(), plotW - 200, plotH - 55, {255, 255, 0, 255});
                     }
                 }
@@ -4524,33 +5368,41 @@ int SDL_main(int argc, char* argv[])
                     int textW, textH;
                     stringstream ss;
                     SDL_Color white = {255, 255, 255, 255};
+                    const char* xUnit = isFrequencyDomain ? "Hz" : "s";
+                    const char* t1Lbl = isFrequencyDomain ? "F1:" : "T1:";
+                    const char* t2Lbl = isFrequencyDomain ? "F2:" : "T2:";
+                    const char* dtLbl = isFrequencyDomain ? "dF:" : "dT:";
 
-                    drawText(plotRenderer, font, "T1:", labelX, currentY, c1_color);
-                    ss.str(""); ss << fixed << setprecision(4) << c_t1 << "s";
+                    const char* y1Lbl = isFrequencyDomain ? "Mag1:" : (c1IsCurrent ? "I1:" : "V1:");
+                    const char* y2Lbl = isFrequencyDomain ? "Mag2:" : (c2IsCurrent ? "I2:" : "V2:");
+                    const char* y1Unit = c1IsCurrent ? "A" : "V";
+                    const char* y2Unit = c2IsCurrent ? "A" : "V";
+                    drawText(plotRenderer, font, t1Lbl, labelX, currentY, c1_color);
+                    ss.str(""); ss << fixed << setprecision(4) << c_t1 << xUnit;
                     TTF_SizeText(font, ss.str().c_str(), &textW, &textH); // Get width of text
                     drawText(plotRenderer, font, ss.str(), valueX_RightEdge - textW, currentY, c1_color);
                     currentY += 15;
 
-                    drawText(plotRenderer, font, "V1:", labelX, currentY, c1_color);
-                    ss.str(""); ss << fixed << setprecision(4) << c_v1 << "V";
+                    drawText(plotRenderer, font, y1Lbl, labelX, currentY, c1_color);
+                    ss.str(""); ss << fixed << setprecision(4) << c_v1 << y1Unit;
                     TTF_SizeText(font, ss.str().c_str(), &textW, &textH);
                     drawText(plotRenderer, font, ss.str(), valueX_RightEdge - textW, currentY, c1_color);
                     currentY += 20;
 
-                    drawText(plotRenderer, font, "T2:", labelX, currentY, c2_color);
+                    drawText(plotRenderer, font, t2Lbl, labelX, currentY, c2_color);
                     ss.str(""); ss << fixed << setprecision(4) << c_t2 << "s";
                     TTF_SizeText(font, ss.str().c_str(), &textW, &textH);
                     drawText(plotRenderer, font, ss.str(), valueX_RightEdge - textW, currentY, c2_color);
                     currentY += 15;
 
-                    drawText(plotRenderer, font, "V2:", labelX, currentY, c2_color);
+                    drawText(plotRenderer, font, y2Lbl, labelX, currentY, c2_color);
                     ss.str(""); ss << fixed << setprecision(4) << c_v2 << "V";
                     TTF_SizeText(font, ss.str().c_str(), &textW, &textH);
                     drawText(plotRenderer, font, ss.str(), valueX_RightEdge - textW, currentY, c2_color);
                     currentY += 20;
+                    drawText(plotRenderer, font, dtLbl, labelX, currentY, white);
+                    ss.str(""); ss << fixed << setprecision(4) << fabs(c_t2 - c_t1) << xUnit;
 
-                    drawText(plotRenderer, font, "dT:", labelX, currentY, white);
-                    ss.str(""); ss << fixed << setprecision(4) << dt << "s";
                     TTF_SizeText(font, ss.str().c_str(), &textW, &textH);
                     drawText(plotRenderer, font, ss.str(), valueX_RightEdge - textW, currentY, white);
                     currentY += 15;
@@ -4563,25 +5415,29 @@ int SDL_main(int argc, char* argv[])
             }
             if (font) {
                 const int numDivisions = 10;
+                double vPerDiv = (view_maxV - view_minV) / numDivisions;
 
-                double voltageScalePerDiv = (view_maxV - view_minV) / numDivisions;
-                double timeScalePerDiv = (view_maxT - view_minT) / numDivisions;
+                std::stringstream ss;
+                ss << std::fixed << std::setprecision(2) << vPerDiv << " V/div";
+                string vScaleText = ss.str(); ss.str("");
 
-                stringstream ss;
-                ss << fixed << setprecision(2) << voltageScalePerDiv << " V/div";
-                string vScaleText = ss.str();
+                string xScaleText;
+                if (!isFrequencyDomain) {
+                    double tPerDiv = (view_maxT - view_minT) / numDivisions;
+                    ss << std::fixed << std::setprecision(3) << tPerDiv*1000 << " ms/div";
+                    xScaleText = ss.str();
+                } else {
+                    double fPerDiv = (view_maxT - view_minT) / numDivisions; // view_minT/maxT اینجا فرکانس هستند
+                    ss << std::fixed << std::setprecision(2) << fPerDiv << " Hz/div";
+                    xScaleText = ss.str();
+                }
 
-                ss.str("");
-                ss << fixed << setprecision(3) << timeScalePerDiv * 1000 << " ms/div"; // Display time in milliseconds
-                string tScaleText = ss.str();
-
-                int plotW, plotH;
-                SDL_GetWindowSize(plotWindow, &plotW, &plotH);
-
-                SDL_Color scaleColor = {200, 200, 200, 255};
+                int plotW, plotH; SDL_GetWindowSize(plotWindow, &plotW, &plotH);
+                SDL_Color scaleColor = {200,200,200,255};
                 drawText(plotRenderer, font, vScaleText, plotW - 140, plotH - 40, scaleColor);
-                drawText(plotRenderer, font, tScaleText, plotW - 140, plotH - 25, scaleColor);
+                drawText(plotRenderer, font, xScaleText, plotW - 140, plotH - 25, scaleColor);
             }
+
             if (panjare_math) {
                 mathPanelRect = {50, 50, 300, 200};
 
@@ -4595,7 +5451,7 @@ int SDL_main(int argc, char* argv[])
                 int input_h = 25;
                 int label_x = mathPanelRect.x + 15;
                 int input_x = mathPanelRect.x + 85;
-                //مستطیل های اینپوت برای نوشتن تو قسمت math
+
                 drawText(plotRenderer, font, "Signal 1:", label_x, mathPanelRect.y + 50, textColor);
                 mathInput1Rect = {input_x, mathPanelRect.y + 45, input_w, input_h};
                 FilledRect(plotRenderer, mathInput1Rect.x, mathInput1Rect.y, mathInput1Rect.w, mathInput1Rect.h, 20, 20, 20, 255);
@@ -4635,11 +5491,15 @@ int SDL_main(int argc, char* argv[])
         if (isDeleteMode) {
             int mouseX, mouseY;
             SDL_GetMouseState(&mouseX, &mouseY);
-            // یک ضربدر قرمز کوچک در محل نشانگر ماوس رسم کن
-            if (mouseY > 50) { // فقط در فضای کاری، نه روی نوار ابزار
+
+            if (mouseY > 50) {
                 drawDeleteIcon(renderer, mouseX - 10, mouseY - 10, 20);
             }
         }
+        if (isProbeMode) {
+            drawText(renderer, font, "PROBE MODE", 20, 55, {255, 200, 0, 255});
+        }
+
 
         if (plotWindow) {
             SDL_RenderPresent(plotRenderer);
